@@ -1,0 +1,33 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+
+# === IDEs ===
+.vscode/
+.idea/
+*.swp
+*.sublime-*
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === Project: PST binaries (NEVER commit these) ===
+*.pst
+
+# === Project: temporary extraction artifacts ===
+pst_extract_*/
+tmp/
+temp/
+*.tmp
+
+# === Logs ===
+*.log
