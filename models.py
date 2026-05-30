@@ -8,7 +8,6 @@ class EmailProcessor:
         self.clean_emails = []
 
     def extract_from_pst(self):
-        """Извлича имейли от PST файла чрез readpst."""
         temp_dir = tempfile.mkdtemp(prefix='pst_extract_')
         try:
             subprocess.run(['readpst', '-M', '-o', temp_dir, self.pst_path], check=True)
@@ -25,7 +24,6 @@ class EmailProcessor:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def filter_and_sort(self):
-        """Филтрира системните имейли и сортира."""
         exclude = [
             r'noreply|no-reply|postmaster|abuse',
             r'[a-f0-9]{32}',
@@ -43,7 +41,6 @@ class EmailProcessor:
         self.clean_emails.sort()   # ← сортиране, както изискват
 
     def save_to_csv(self, filename):
-        """Записва резултата в CSV."""
         path = os.path.join(self.output_dir, filename)
         with open(path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
@@ -53,7 +50,6 @@ class EmailProcessor:
         return path
 
     def get_stats(self):
-        """Връща статистика."""
         return {
             'raw': len(self.raw_emails),
             'unique_clean': len(self.clean_emails)

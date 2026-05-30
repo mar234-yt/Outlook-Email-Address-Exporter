@@ -12,8 +12,8 @@ def main():
     out = processor.save_to_csv(sys.argv[2])
     stats = processor.get_stats()
 
-    print(f"Готово! Записано в: {out}")
-    print(f"Статистика: {stats}")
+    print(f"Done! Saved in: {out}")
+    print(f"Stats: {stats}")
 
 if __name__ == "__main__":
     main()
