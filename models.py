@@ -1,4 +1,4 @@
-import os, re, csv, tempfile, shutil, subprocess
+import os, re, csv, tempfile, shutil, subprocess, glob, time
 
 class EmailProcessor:
     def __init__(self, pst_path, output_dir="."):
@@ -7,28 +7,75 @@ class EmailProcessor:
         self.raw_emails = []
         self.clean_emails = []
 
-    def extract_from_pst(self):
+    def _cleanup_old_temp(self):
+        """Remove stale pst_extract_* dirs from /tmp to avoid readpst confusion."""
+        for old in glob.glob('/tmp/pst_extract_*'):
+            try:
+                shutil.rmtree(old, ignore_errors=True)
+            except Exception:
+                pass
+
+    def extract_from_pst(self, max_retries=2):
+        self._cleanup_old_temp()
         temp_dir = tempfile.mkdtemp(prefix='pst_extract_')
+        last_error = None
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                # Use timeout to avoid hanging on corrupted PSTs
+                result = subprocess.run(
+                    ['readpst', '-M', '-o', temp_dir, self.pst_path],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=300  # 5 minutes max
+                )
+                break  # success
+            except subprocess.CalledProcessError as e:
+                last_error = e
+                # Exit 139 = segfault; 1 = generic error; others possible
+                print(f"[Attempt {attempt}] readpst failed with exit {e.returncode}. Cleaning up and retrying...")
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                if attempt < max_retries:
+                    time.sleep(1)
+                    temp_dir = tempfile.mkdtemp(prefix='pst_extract_')
+                else:
+                    raise RuntimeError(
+                        f"readpst crashed {max_retries} times (last exit: {e.returncode}). "
+                        f"The PST may be corrupted or too large for readpst. "
+                        f"Try: readpst -S -o /tmp/manual_extract '{self.pst_path}'"
+                    ) from e
+            except subprocess.TimeoutExpired:
+                print(f"[Attempt {attempt}] readpst timed out after 5 minutes. Retrying...")
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                if attempt < max_retries:
+                    time.sleep(1)
+                    temp_dir = tempfile.mkdtemp(prefix='pst_extract_')
+                else:
+                    raise RuntimeError("readpst timed out repeatedly. PST may be too large.")
+
         try:
-            subprocess.run(['readpst', '-M', '-o', temp_dir, self.pst_path], check=True)
             # Improved regex: no leading/trailing dots in local part
             pattern = r'[\w-]+(?:\.[\w-]+)*@[\w-]+(?:\.[\w-]+)*\.\w+'
+            file_count = 0
             for root, _, files in os.walk(temp_dir):
                 for file in files:
                     path = os.path.join(root, file)
-                    with open(path, 'r', errors='ignore') as f:
-                        found = re.findall(pattern, f.read())
-                        for addr in found:
-                            addr = addr.lower().strip()
-                            # Strip accidental leading/trailing dots
-                            addr = addr.strip('.')
-                            if len(addr) > 5 and '.' in addr.split('@')[-1]:
-                                self.raw_emails.append(addr)
+                    try:
+                        with open(path, 'r', errors='ignore') as f:
+                            found = re.findall(pattern, f.read())
+                            for addr in found:
+                                addr = addr.lower().strip().strip('.')
+                                if len(addr) > 5 and '.' in addr.split('@')[-1]:
+                                    self.raw_emails.append(addr)
+                        file_count += 1
+                    except Exception:
+                        pass
+            print(f"Scanned {file_count} extracted files.")
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def filter_and_sort(self):
-        # Domain-based system filters
         system_domains = [
             r'prod\.outlook\.com$',
             r'prod\.exchangelabs\.com$',
@@ -90,7 +137,6 @@ class EmailProcessor:
             r'ip-172-\d+-\d+-\d+\.ec2\.internal$',
         ]
 
-        # Local-part heuristic filters
         local_junk = [
             r'^image\d+\.(jpg|jpeg|png|gif|bmp)',
             r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$',
@@ -121,7 +167,7 @@ class EmailProcessor:
             r'^icloud_footer_signoff',
             r'^0{5,}',
             r'^\d{6,}$',
-            r'^.{30,}$',  # ANY local part over 30 chars is almost certainly system
+            r'^.{30,}$',
             r'^\d{8,}\.',
             r'^\d{6,}@',
             r'^\d{4,}-\d{4,}-\d{4,}',
@@ -153,7 +199,7 @@ class EmailProcessor:
             r'^notice$',
             r'^0\.\d+\.\d+\.\d+',
             r'^\d{4,}\.\d{4,}\.\d{4,}',
-            r'^[a-z]{2,5}\d+pr\d+mb\d+',  # Exchange server naming
+            r'^[a-z]{2,5}\d+pr\d+mb\d+',
             r'^db\d+pr\d+mb\d+',
             r'^am\d+pr\d+mb\d+',
             r'^as\d+pr\d+mb\d+',
@@ -179,24 +225,16 @@ class EmailProcessor:
         for email in self.raw_emails:
             email = email.strip()
             local, _, domain = email.partition('@')
-
-            # Domain-based filtering
             if any(re.search(p, domain) for p in system_domains):
                 continue
-
-            # Local-part filtering
             if any(re.search(p, local) for p in local_junk):
                 continue
-
-            # Gmail heuristic: filter purely numeric or long random alpha-only
             if domain == 'gmail.com':
                 if re.search(r'^[a-z]{10,}$', local) or re.search(r'^\d+$', local):
                     continue
-
             if email not in seen:
                 seen.add(email)
                 self.clean_emails.append(email)
-
         self.clean_emails.sort()
 
     def save_to_csv(self, filename):
