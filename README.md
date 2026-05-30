@@ -4,8 +4,11 @@ Outlook Email Address Exporter
 от Microsoft Outlook PST архиви
 
 Автор: Мариян Димитров, 2474
+
 Курс: Програмиране на Python, УниБИТ
+
 GitHub: https://github.com/mar234-yt/Outlook-Email-Address-Exporter
+
 
 
 1. ОПИСАНИЕ НА ПРОЕКТА
@@ -21,12 +24,18 @@ GitHub: https://github.com/mar234-yt/Outlook-Email-Address-Exporter
 2. СТРУКТУРА НА ПРОЕКТА
 -----------------------
 .
+
 ├── models.py              # Модул с бизнес логика (клас EmailProcessor)
+
 ├── main.py                # Главен модул за изпълнение
+
 ├── requirements.txt       # Зависимости (стандартна библиотека на Python)
-├── readme.txt             # Настоящ файл
+
+├── readme.md              # Настоящ файл
+
 ├── .gitignore             # Изключване на PST файлове и временни директории
-└── addresses_clean.csv    # Примерен изход от обработка (демонстрационни данни)
+
+└── Техническа документация и практическо ръководство.docx
 
 
 3. ИЗИСКВАНИЯ ЗА СРЕДАТА
