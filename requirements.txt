@@ -1,0 +1,2 @@
+# No external pip packages required. 
+# System dependency: readpst (libpst-tools, installed via apt)
