@@ -1,4 +1,4 @@
-import os, re, csv, tempfile, shutil, subprocess, glob, time
+import os, re, csv, tempfile, shutil, subprocess, glob, time, threading, sys
 
 class EmailProcessor:
     def __init__(self, pst_path, output_dir="."):
@@ -6,59 +6,89 @@ class EmailProcessor:
         self.output_dir = output_dir
         self.raw_emails = []
         self.clean_emails = []
+        self._temp_dir = None
+        self._stop_monitor = threading.Event()
 
     def _cleanup_old_temp(self):
-        """Remove stale pst_extract_* dirs from /tmp to avoid readpst confusion."""
         for old in glob.glob('/tmp/pst_extract_*'):
             try:
                 shutil.rmtree(old, ignore_errors=True)
             except Exception:
                 pass
 
-    def extract_from_pst(self, max_retries=2):
-        self._cleanup_old_temp()
-        temp_dir = tempfile.mkdtemp(prefix='pst_extract_')
-        last_error = None
+    def _count_files(self, directory):
+        return sum(1 for _, _, files in os.walk(directory) for _ in files)
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                # Use timeout to avoid hanging on corrupted PSTs
-                result = subprocess.run(
-                    ['readpst', '-M', '-o', temp_dir, self.pst_path],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=300  # 5 minutes max
-                )
-                break  # success
-            except subprocess.CalledProcessError as e:
-                last_error = e
-                # Exit 139 = segfault; 1 = generic error; others possible
-                print(f"[Attempt {attempt}] readpst failed with exit {e.returncode}. Cleaning up and retrying...")
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                if attempt < max_retries:
-                    time.sleep(1)
-                    temp_dir = tempfile.mkdtemp(prefix='pst_extract_')
-                else:
-                    raise RuntimeError(
-                        f"readpst crashed {max_retries} times (last exit: {e.returncode}). "
-                        f"The PST may be corrupted or too large for readpst. "
-                        f"Try: readpst -S -o /tmp/manual_extract '{self.pst_path}'"
-                    ) from e
-            except subprocess.TimeoutExpired:
-                print(f"[Attempt {attempt}] readpst timed out after 5 minutes. Retrying...")
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                if attempt < max_retries:
-                    time.sleep(1)
-                    temp_dir = tempfile.mkdtemp(prefix='pst_extract_')
-                else:
-                    raise RuntimeError("readpst timed out repeatedly. PST may be too large.")
+    def _monitor_extraction(self):
+        """Background thread: prints file count to stderr every 3 seconds."""
+        while not self._stop_monitor.is_set():
+            if self._temp_dir and os.path.exists(self._temp_dir):
+                count = self._count_files(self._temp_dir)
+                sys.stderr.write(f"\r  [extract] Files extracted so far: {count}   ")
+                sys.stderr.flush()
+            time.sleep(3)
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+
+    def _print_progress_bar(self, current, total, prefix='Progress', suffix='Complete', length=40):
+        if total == 0:
+            return
+        filled = int(length * current // total)
+        bar = '█' * filled + '-' * (length - filled)
+        percent = f"{100 * current / total:.1f}%"
+        sys.stdout.write(f'\r{prefix} |{bar}| {percent} {suffix}')
+        sys.stdout.flush()
+        if current == total:
+            sys.stdout.write('\n')
+            sys.stdout.flush()
+
+    def extract_from_pst(self):
+        self._cleanup_old_temp()
+        self._temp_dir = tempfile.mkdtemp(prefix='pst_extract_')
+        partial = False
+
+        print(f"\nExtracting PST to: {self._temp_dir}")
+        print("Running readpst... (this may take 10-30 minutes for large mailboxes)")
+        print("Press Ctrl+C to abort.\n")
+
+        # Start background monitor
+        self._stop_monitor.clear()
+        monitor = threading.Thread(target=self._monitor_extraction, daemon=True)
+        monitor.start()
 
         try:
-            # Improved regex: no leading/trailing dots in local part
+            # STABLE approach: inherited stdout/stderr — readpst talks directly to terminal
+            subprocess.run(
+                ['readpst', '-M', '-o', self._temp_dir, self.pst_path],
+                check=True
+            )
+        except subprocess.CalledProcessError as e:
+            extracted = self._count_files(self._temp_dir)
+            if extracted > 100:
+                print(f"\n[WARNING] readpst crashed (exit {e.returncode}) but {extracted} files were already extracted.")
+                print("Processing partial data — most unique addresses are already captured.")
+                partial = True
+            else:
+                raise RuntimeError(
+                    f"readpst failed with exit {e.returncode} and only extracted {extracted} files. "
+                    f"Try: readpst -M -o /tmp/manual_extract '{self.pst_path}'"
+                ) from e
+        finally:
+            self._stop_monitor.set()
+            monitor.join(timeout=2)
+
+        # --- Scan extracted files with progress bar ---
+        try:
             pattern = r'[\w-]+(?:\.[\w-]+)*@[\w-]+(?:\.[\w-]+)*\.\w+'
+            total_files = self._count_files(self._temp_dir)
+            print(f"\nScanning {total_files} extracted files for email addresses...")
+            if partial:
+                print("NOTE: Partial extraction — some emails were skipped due to PST corruption.")
+
             file_count = 0
-            for root, _, files in os.walk(temp_dir):
+            email_count = 0
+
+            for root, _, files in os.walk(self._temp_dir):
                 for file in files:
                     path = os.path.join(root, file)
                     try:
@@ -68,12 +98,21 @@ class EmailProcessor:
                                 addr = addr.lower().strip().strip('.')
                                 if len(addr) > 5 and '.' in addr.split('@')[-1]:
                                     self.raw_emails.append(addr)
-                        file_count += 1
+                                    email_count += 1
                     except Exception:
                         pass
-            print(f"Scanned {file_count} extracted files.")
+                    file_count += 1
+                    if total_files > 0 and (file_count % 50 == 0 or file_count == total_files):
+                        self._print_progress_bar(
+                            file_count, total_files,
+                            prefix='Scanning',
+                            suffix=f'({email_count} addresses found)'
+                        )
+
+            print(f"\nDone. Scanned {file_count} files, extracted {email_count} raw addresses.")
         finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            shutil.rmtree(self._temp_dir, ignore_errors=True)
+            self._temp_dir = None
 
     def filter_and_sort(self):
         system_domains = [
@@ -222,7 +261,10 @@ class EmailProcessor:
         ]
 
         seen = set()
-        for email in self.raw_emails:
+        total = len(self.raw_emails)
+        print(f"\nFiltering {total} raw addresses...")
+
+        for i, email in enumerate(self.raw_emails, 1):
             email = email.strip()
             local, _, domain = email.partition('@')
             if any(re.search(p, domain) for p in system_domains):
@@ -235,7 +277,12 @@ class EmailProcessor:
             if email not in seen:
                 seen.add(email)
                 self.clean_emails.append(email)
+
+            if i % 500 == 0 or i == total:
+                self._print_progress_bar(i, total, prefix='Filtering', suffix=f'({len(self.clean_emails)} kept)')
+
         self.clean_emails.sort()
+        print(f"\nResult: {total} raw -> {len(self.clean_emails)} clean unique addresses")
 
     def save_to_csv(self, filename):
         path = os.path.join(self.output_dir, filename)
@@ -244,6 +291,7 @@ class EmailProcessor:
             writer.writerow(['email_address'])
             for e in self.clean_emails:
                 writer.writerow([e])
+        print(f"Saved to: {path}")
         return path
 
     def get_stats(self):
